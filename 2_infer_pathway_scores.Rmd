@@ -1,0 +1,136 @@
+---
+title: "Infer pathway activity with decoupleR"
+author: "Erdogan Pekcan Erkan"
+date: "11/6/2023"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r required packages}
+required_packages <- c("Seurat","decoupleR","dplyr","tibble","tidyr","patchwork","ggplot2","ComplexHeatmap")
+
+pacman::p_load(required_packages, character.only = T)
+```
+
+```{r get progeny}
+net <- get_progeny(organism = 'human', top = 500)
+```
+
+```{r prepare scrnaseq data}
+hgsc_merged <- readRDS("../data/processed_data/hgsc_merged.RDS")
+
+# Change identity to "orig.ident"
+Idents(hgsc_merged) <- "orig.ident"
+
+# Subset individual samples
+S038 <- subset(x = hgsc_merged, idents = "S038_rAdnR_SC")
+S041 <- subset(x = hgsc_merged, idents = "S041_rOva_SC")
+S045R <- subset(x = hgsc_merged, idents = "S045_rOvaR_SC")
+
+# Change identity to "cell_type"
+Idents(S038) <- "cell_type"
+Idents(S041) <- "cell_type"
+Idents(S045R) <- "cell_type"
+```
+
+```{r infer pathway activities}
+# Define a function to infer pathway activity scores
+InferPathwayScores <- function(input) {
+    
+    # Extract the normalized log-transformed counts
+    mat <- as.matrix(input@assays$RNA@data)
+
+    # Run mlm
+    pathway_scores <- run_ulm(mat=mat, network = net, .source='source', .target='target', .mor='weight', minsize = 5)
+    
+    # Extract mlm and store it in pathwaysmlm in data
+    input[['pathwaysmlm']] <- pathway_scores %>% 
+        pivot_wider(id_cols = 'source', names_from = 'condition', values_from = 'score') %>% 
+        column_to_rownames('source') %>% 
+        Seurat::CreateAssayObject(.)
+
+    # Change assay
+    DefaultAssay(object = input) <- "pathwaysmlm"
+
+    # Scale the data
+    input <- ScaleData(input)
+    input@assays$pathwaysmlm@data <- input@assays$pathwaysmlm@scale.data
+    
+    return(input)
+}
+
+# Infer pathway scores
+S038 <- InferPathwayScores(input = S038)
+S041 <- InferPathwayScores(input = S041)
+S045R <- InferPathwayScores(input = S045R)
+```
+
+```{r visualize pathway activities}
+# Create a new list to store heatmap visualization of pathway scores
+pathway_plots <- list()
+
+VisualizePathwayScores <- function(input) {
+    
+    # Extract activities from object as a long dataframe
+    tmp_df <- t(as.matrix(input@assays$pathwaysmlm@data)) %>% 
+        as.data.frame() %>% 
+        mutate(cluster = Idents(input)) %>% 
+        pivot_longer(cols = -cluster, names_to = "source", values_to = "score") %>% 
+        group_by(cluster, source) %>% 
+        summarise(mean = mean(score))
+
+    # Transform to wide matrix
+    top_acts_mat <- tmp_df %>% 
+        pivot_wider(id_cols = 'cluster', names_from = 'source', values_from = 'mean') %>% 
+        column_to_rownames('cluster') %>% 
+        t() %>% 
+        as.matrix()
+
+    palette_length = 100
+    # Choose color palette
+    hm_colors = hcl.colors(n = palette_length, palette = "Blue Red 3")
+    
+    my_breaks <- c(seq(-2, 0, length.out=ceiling(palette_length/2) + 1), seq(0.05, 2, length.out=floor(palette_length/2)))
+
+    # Plot
+    tmp_hm <- ComplexHeatmap::Heatmap(matrix = top_acts_mat,
+                        col = hm_colors,
+                        cluster_rows = T, 
+                                       cluster_columns = T, 
+                                       rect_gp = grid::gpar(col = "white", lwd = 1),
+                                       column_names_gp = grid::gpar(fontsize = 12), 
+                                       row_names_gp = grid::gpar(fontsize = 12),
+                                       clustering_distance_columns = "euclidean", 
+                                       clustering_method_columns = "complete",
+                                       heatmap_legend_param = list(title = "Pathway activity", 
+                                                                   title_gp = gpar(fontsize = 14, fontface = "bold"),
+                                                                   labels_gp = gpar(fontsize = 12)))
+    
+    return(tmp_hm)
+} 
+
+# Make heatmaps for individual samples
+pathway_plots[["S038"]] <- VisualizePathwayScores(input = S038)
+pathway_plots[["S041"]] <- VisualizePathwayScores(input = S041)
+pathway_plots[["S045R"]] <- VisualizePathwayScores(input = S045R)
+
+# Save heatmaps
+pdf(file = "../outputs/plots/S038_rAdnR_SC_pathway_activity_per_cell_type.pdf", width = 6, height = 6)
+pathway_plots$S038
+dev.off()
+
+pdf(file = "../outputs/plots/S041_rOva_SC_pathway_activity_per_cell_type.pdf", width = 6, height = 6)
+pathway_plots$S041
+dev.off()
+
+pdf(file = "../outputs/plots/S045_rOvaR_SC_pathway_activity_per_cell_type.pdf", width = 6, height = 6)
+pathway_plots$S045R
+dev.off()
+```
+
+```{r}
+sessionInfo()
+```
